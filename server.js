@@ -53,7 +53,7 @@ async function connectDB() {
 
 function getUsersCollection() {
   if (!db) throw new Error("Database not initialized");
-  return db.collection("users");
+  return db.collection("player_data");
 }
 
 // ====== Auth Helpers ======
@@ -144,25 +144,22 @@ app.post("/api/auth/register", async (req, res) => {
 // Login
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { emailOrUsername, password } = req.body;
-
-    if (!emailOrUsername || !password) {
-      return res.status(400).json({ message: "emailOrUsername and password are required" });
+    const { username, unhashedPass } = req.body;
+    if (!username || !unhashedPass) {
+      return res.status(400).json({ message: "username and password are required" });
     }
 
     const users = getUsersCollection();
 
-    const user = await users.findOne({
-      $or: [{ email: emailOrUsername }, { username: emailOrUsername }],
-    });
+    const user = await users.findOne( { username: username });
 
     if (!user) {
-      return res.status(401).json({ message: "Invalid credentials" });
+      return res.status(401).json({ message: "Invalid credentials - user not found" });
     }
 
-    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    const isMatch = await bcrypt.compare(unhashedPass, user.passwordHash);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid credentials" });
+      return res.status(401).json({ message: "Invalid credentials - password does not match" });
     }
 
     const token = generateToken(user);
@@ -171,7 +168,6 @@ app.post("/api/auth/login", async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
       },
       token,
     });
