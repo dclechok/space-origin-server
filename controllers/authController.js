@@ -59,17 +59,20 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid password" });
     }
 
-    res.json({
+    const token = generateToken(user);
+
+    return res.json({
       user: {
         id: user._id.toString(),
         username: user.username,
-        email: user.email,
+        characters: user.characters || []
       },
-      token: generateToken(user),
+      token,
     });
+
   } catch (err) {
     console.error("Login error:", err);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -90,13 +93,15 @@ exports.me = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    res.json({
-      user: {
-        id: user._id.toString(),
-        username: user.username,
-        email: user.email,
-      },
-    });
+  res.json({
+    user: {
+    id: user._id.toString(),
+    username: user.username,
+    email: user.email,
+    characters: user.characters || []
+    },
+  });
+
   } catch (err) {
     console.error("Me error:", err);
     res.status(500).json({ message: "Server error" });

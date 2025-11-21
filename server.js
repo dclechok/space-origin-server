@@ -8,11 +8,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// DB connect
-connectDB();
+async function startServer() {
 
-// API routes
-app.use("/api", routes);
+  // connect and store db instance
+  const db = await connectDB();
+  app.locals.db = db;
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+  // mount API routes
+  app.use("/api", routes);
+
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () =>
+    console.log(`🚀 Server running on port ${PORT}`)
+  );
+}
+
+startServer();
