@@ -1,11 +1,7 @@
-// controllers/inventoryController.js
 const { ObjectId } = require("mongodb");
 const { broadcastInventoryUpdate } = require("../utils/inventory");
 
-// =========================================
-// GET INVENTORY (already working)
-// =========================================
-exports.getInventory = async function(req, res) {
+async function getInventory(req, res) {
   try {
     const db = req.app.locals.db;
     const playerId = req.params.playerId;
@@ -22,9 +18,10 @@ exports.getInventory = async function(req, res) {
 
     const inventory = player.inventory || [];
 
+    // NEW: inventory contains objects
     const itemIds = inventory
-      .filter(id => id && id !== "0" && /^[a-fA-F0-9]{24}$/.test(id))
-      .map(id => new ObjectId(id));
+      .filter(slot => slot && slot.itemId)
+      .map(slot => new ObjectId(slot.itemId));
 
     const itemDocs = itemIds.length
       ? await itemsCol.find({ _id: { $in: itemIds } }).toArray()
@@ -43,30 +40,31 @@ exports.getInventory = async function(req, res) {
       };
     }
 
-    const slots = inventory.map(id =>
-      !id || id === "0" ? null : itemMap[id] || null
+    const slots = inventory.map(slot =>
+      !slot || !slot.itemId
+        ? null
+        : {
+            ...itemMap[slot.itemId],
+            qty: slot.qty || 1
+          }
     );
 
     res.json({ slots });
 
   } catch (err) {
-    console.error("Inventory controller error:", err);
+    console.error("Inventory error:", err);
     res.status(500).json({ message: "Server error" });
   }
-};
+}
 
-// =========================================
-// PICK UP AN ITEM — NEW
-// =========================================
-exports.pickupItem = async function(req, res) {
+async function pickupItem(req, res) {
   try {
     const db = req.app.locals.db;
-    const io = req.app.locals.io; // 🔥 socket available here
+    const io = req.app.locals.io;
 
     const { playerId } = req.params;
     const { itemId } = req.body;
 
-    // Validate IDs
     if (!/^[a-fA-F0-9]{24}$/.test(playerId)) {
       return res.status(400).json({ message: "Invalid player ID" });
     }
@@ -76,28 +74,23 @@ exports.pickupItem = async function(req, res) {
 
     const playersCol = db.collection("player_data");
 
-    // Fetch the player
     const player = await playersCol.findOne({ _id: new ObjectId(playerId) });
     if (!player) return res.status(404).json({ message: "Player not found" });
 
     const inv = player.inventory || [];
 
-    // Find first empty slot ("0" or null)
-    const emptyIndex = inv.findIndex(s => !s || s === "0" || s === "");
+    const emptyIndex = inv.findIndex(s => !s || !s.itemId);
     if (emptyIndex === -1) {
       return res.status(400).json({ message: "Inventory full" });
     }
 
-    // Insert item into slot
-    inv[emptyIndex] = itemId;
+    inv[emptyIndex] = { itemId, qty: 1 };
 
-    // Update database
     await playersCol.updateOne(
       { _id: new ObjectId(playerId) },
       { $set: { inventory: inv } }
     );
 
-    // 🔥 Send update to client(s)
     broadcastInventoryUpdate(io, playerId, inv);
 
     return res.json({
@@ -110,4 +103,9 @@ exports.pickupItem = async function(req, res) {
     console.error("Pickup error:", err);
     res.status(500).json({ message: "Server error" });
   }
+}
+
+module.exports = {
+  getInventory,
+  pickupItem,
 };
