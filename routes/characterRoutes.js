@@ -1,7 +1,8 @@
-const router = require("express").Router();
+const express = require("express");
+const router = express.Router();
+const { getCharactersForAccount } = require("../controllers/characterController");
 const auth = require("../middleware/auth");
-const CharacterController = require("../controllers/characterController");
 
-router.post("/byIds", auth, CharacterController.getCharactersByIds);
+router.get("/:id", auth, getCharactersForAccount);
 
 module.exports = router;

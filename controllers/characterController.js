@@ -1,20 +1,22 @@
 const { ObjectId } = require("mongodb");
 
-exports.getCharactersByIds = async (req, res) => {
+exports.getCharactersForAccount = async (req, res) => {
   try {
     const db = req.app.locals.db;
-    const collection = db.collection("player_data");
+    const accounts = db.collection("player_data");
 
-    const { ids } = req.body;
+    const accountId = req.params.id;
 
-    const cleanIds = ids.filter(id => id && id.trim() !== "");
-    const objIds = cleanIds.map(id => new ObjectId(id));
+    const account = await accounts.findOne(
+      { _id: new ObjectId(accountId) },
+      { projection: { passwordHash: 0 } }
+    );
 
-    const chars = await collection.find({
-      _id: { $in: objIds }
-    }).toArray();
+    if (!account) {
+      return res.json({ characters: [] });
+    }
 
-    res.json({ characters: chars });
+    res.json({ characters: account.characters || [] });
 
   } catch (err) {
     console.error("Character fetch error:", err);
