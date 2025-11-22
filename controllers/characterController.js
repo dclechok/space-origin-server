@@ -2,6 +2,7 @@ const { ObjectId, isValidObjectId } = require("mongodb");
 
 exports.getCharactersForAccount = async (req, res) => {
   try {
+    console.log(req.params)
     const accountId = req.params.id;
 
     if (!ObjectId.isValid(accountId)) {
