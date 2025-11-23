@@ -5,7 +5,6 @@ exports.getCharactersForAccount = async (req, res) => {
     const accountId = req.params.id;
 
     if (!ObjectId.isValid(accountId)) {
-      console.log("Invalid accountId:", accountId);
       return res.json({ characters: [] });
     }
 

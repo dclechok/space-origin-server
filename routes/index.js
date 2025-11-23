@@ -4,5 +4,6 @@ router.use("/auth", require("./authRoutes"));
 router.use("/accounts", require("./accountRoutes"));
 router.use("/characters", require("./characterRoutes"));
 router.use("/inventory", require("./inventoryRoutes"));
+router.use("/map", require("./mapRoutes"));
 
 module.exports = router;
