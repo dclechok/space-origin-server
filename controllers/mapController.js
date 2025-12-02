@@ -69,3 +69,22 @@ exports.getSceneById = async (req, res) => {
     res.status(500).json({ message: "Server error fetching scene" });
   }
 };
+
+// ===============================
+// GET ALL SCENES
+// ===============================
+exports.getAllScenes = async (req, res) => {
+  try {
+    const db = getDB();
+
+    const scenes = await db
+      .collection("scene_data")
+      .find({})
+      .toArray();
+
+    res.json({ scenes });
+  } catch (err) {
+    console.error("Error fetching all scenes:", err);
+    res.status(500).json({ message: "Server error fetching scenes" });
+  }
+};
