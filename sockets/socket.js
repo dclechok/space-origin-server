@@ -1,3 +1,7 @@
+const commandParser = require("./../commands/commandParser");
+const { ObjectId } = require("mongodb");
+const activePlayers = {};
+
 module.exports = function socketHandler(io) {
 
   // Optional: store last 50 messages per region
@@ -6,6 +10,9 @@ module.exports = function socketHandler(io) {
   io.on("connection", (socket) => {
     console.log("🔥 Client connected:", socket.id);
 
+    socket.on("identify", ({ characterId }) => {
+      activePlayers[socket.id] = characterId;
+    });
 
     // ======================================================
     // 🔵 REGIONAL CHAT SYSTEM
@@ -81,6 +88,57 @@ module.exports = function socketHandler(io) {
       }
     });
 
+  socket.on("command", async (input) => {
+  try {
+    const parsed = commandParser(input);
+
+    if (parsed.error) {
+      return socket.emit("sceneData", { error: parsed.error });
+    }
+
+    // FIX: Extract cmd too
+    const { handler, args, cmd } = parsed;
+
+    const characterId = activePlayers[socket.id];
+    if (!characterId) {
+      return socket.emit("sceneData", { error: "Player not identified." });
+    }
+
+    const db = require("../config/db").getDB();
+    const { ObjectId } = require("mongodb");
+
+    // Load correct character document
+    const player = await db.collection("player_data").findOne({
+      _id: new ObjectId(characterId),
+    });
+
+    if (!player) {
+      return socket.emit("sceneData", { error: "Player not found." });
+    }
+
+    const result = await handler(cmd, player, socket);
+
+
+    socket.emit("sceneData", result);
+
+    // Save updated location
+    if (result.x !== undefined && result.y !== undefined) {
+      await db.collection("player_data").updateOne(
+        { _id: player._id },
+        {
+          $set: {
+            "currentLoc.x": result.x,
+            "currentLoc.y": result.y,
+          },
+        }
+      );
+    }
+
+  } catch (err) {
+    console.error("COMMAND ERROR:", err);
+    socket.emit("sceneData", { error: "Server error processing command." });
+  }
+});
 
 
     // ======================================================
