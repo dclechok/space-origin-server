@@ -78,6 +78,7 @@ function spawnCreature(sceneState, spawner, now) {
   sceneState.activeCreatures.push(instance);
 
   console.log(`🧬 Spawned creature: ${instance.instanceId} (${instance.name})`);
+  
 
   // Broadcast entranceDesc to all players in this scene
   if (instance.entranceDesc && ioRef) {

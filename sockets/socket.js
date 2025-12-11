@@ -2,7 +2,7 @@
 const commandParser = require("./../commands/commandParser");
 const { ObjectId } = require("mongodb");
 const activePlayers = {};
-const { ensureSceneState, addPlayerToScene } = require("../world/sceneState");
+const { ensureSceneState, addPlayerToScene, getSceneState } = require("../world/sceneState");
 
 module.exports = function socketHandler(io) {
 
@@ -89,15 +89,16 @@ module.exports = function socketHandler(io) {
 
               ensureSceneState(scene._id, scene);
               addPlayerToScene(scene._id, socket.id);
+              const sceneState = getSceneState(scene._id);
 
-              // ⭐ THE CRITICAL FIX ⭐
               socket.emit("sceneData", {
                   currentLoc: { x: px, y: py },
                   name: scene.name,
                   entranceDesc: scene.entranceDesc,
                   exits: scene.exits,
                   region: scene.regionId,
-                  security: scene.security ?? 0
+                  security: scene.security ?? 0,
+                  creatures: sceneState.activeCreatures.filter(c => c.alive)
               });
 
           } catch (err) {

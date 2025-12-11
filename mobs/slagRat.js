@@ -3,8 +3,7 @@ function slagRat(overrides = {}) {
     id: "slagrat",
     name: "Slag Rat",
     classification: "vermin",
-    level: 1,
-
+    level: 2,
     entranceDesc:
       "A blistered, hairless rat scurries forward from a pile of slag.",
     shortDesc: "A blistered slag rat twitches nearby.",
