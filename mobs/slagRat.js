@@ -6,6 +6,7 @@ function slagRat(overrides = {}) {
     level: 2,
     entranceDesc:
       "A blistered, hairless rat scurries forward from a pile of slag.",
+    idleDesc: "A slag rat sniffs a pile of debris.",
     shortDesc: "A blistered slag rat twitches nearby.",
 
     stats: {
