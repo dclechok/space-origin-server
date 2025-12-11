@@ -7,6 +7,10 @@ const { connectDB } = require("./config/db");
 const routes = require("./routes");
 const socketHandler = require("./sockets/socket");
 
+const { initSpawner } = require("./world/spawner");
+
+const { startWorldTick } = require("./world/worldTick");
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -31,6 +35,10 @@ async function startServer() {
 
   // SOCKET.IO HANDLER
   socketHandler(io);
+
+  initSpawner(io);
+
+  startWorldTick();
 
   const PORT = process.env.PORT || 5000;
   httpServer.listen(PORT, () =>
