@@ -17,7 +17,7 @@ module.exports = function socketHandler(io) {
         });
 
         // ----------------------------------------------------
-        // REGIONAL CHAT (unchanged)
+        // REGIONAL CHAT
         // ----------------------------------------------------
         socket.on("joinRegion", (region) => {
             if (!region) return;
@@ -50,63 +50,59 @@ module.exports = function socketHandler(io) {
             io.to(region).emit("newMessage", msg);
         });
 
-
         // ======================================================
         //  🔵 loadScene — SERVER IS AUTHORITATIVE
-        // =====================================================s=
-      socket.on("loadScene", async ({ x, y }) => {
-          console.log("📥 loadScene request:", x, y);
+        // ======================================================
+        socket.on("loadScene", async ({ x, y }) => {
+            console.log("📥 loadScene request:", x, y);
 
-          try {
-              const db = require("../config/db").getDB();
+            try {
+                const db = require("../config/db").getDB();
 
-              const characterId = activePlayers[socket.id];
-              if (!characterId)
-                  return socket.emit("sceneError", { error: "Player not identified." });
+                const characterId = activePlayers[socket.id];
+                if (!characterId)
+                    return socket.emit("sceneError", { error: "Player not identified." });
 
-              // Load the PLAYER correctly
-              const player = await db.collection("player_data").findOne({
-                  _id: new ObjectId(characterId)
-              });
+                const player = await db.collection("player_data").findOne({
+                    _id: new ObjectId(characterId)
+                });
 
-              if (!player)
-                  return socket.emit("sceneError", { error: "Player not found." });
+                if (!player)
+                    return socket.emit("sceneError", { error: "Player not found." });
 
-              // Use the PLAYER’S actual coordinates — NOT the request
-              const px = Number(player.currentLoc.x);
-              const py = Number(player.currentLoc.y);
+                const px = Number(player.currentLoc.x);
+                const py = Number(player.currentLoc.y);
 
-              const scene = await db.collection("scene_data").findOne({
-                  x: px,
-                  y: py
-              });
+                const scene = await db.collection("scene_data").findOne({
+                    x: px,
+                    y: py
+                });
 
-              if (!scene) {
-                  return socket.emit("sceneError", {
-                      error: `Scene [${px}, ${py}] not found`
-                  });
-              }
+                if (!scene) {
+                    return socket.emit("sceneError", {
+                        error: `Scene [${px}, ${py}] not found`
+                    });
+                }
 
-              ensureSceneState(scene._id, scene);
-              addPlayerToScene(scene._id, socket.id);
-              const sceneState = getSceneState(scene._id);
+                ensureSceneState(scene._id, scene);
+                addPlayerToScene(scene._id, socket.id);
+                const sceneState = getSceneState(scene._id);
 
-              socket.emit("sceneData", {
-                  currentLoc: { x: px, y: py },
-                  name: scene.name,
-                  entranceDesc: scene.entranceDesc,
-                  exits: scene.exits,
-                  region: scene.regionId,
-                  security: scene.security ?? 0,
-                  creatures: sceneState.activeCreatures.filter(c => c.alive)
-              });
+                socket.emit("sceneData", {
+                    currentLoc: { x: px, y: py },
+                    name: scene.name,
+                    entranceDesc: scene.entranceDesc,
+                    exits: scene.exits,
+                    region: scene.regionId,
+                    security: scene.security ?? 0,
+                    creatures: sceneState.activeCreatures.filter(c => c.alive)
+                });
 
-          } catch (err) {
-              console.error("❌ loadScene error:", err);
-              socket.emit("sceneError", { error: "Server error loading scene" });
-          }
-      });
-
+            } catch (err) {
+                console.error("❌ loadScene error:", err);
+                socket.emit("sceneError", { error: "Server error loading scene" });
+            }
+        });
 
         // ======================================================
         // 🔵 COMMAND HANDLING (MOVE, TALK, ETC.)
@@ -136,13 +132,9 @@ module.exports = function socketHandler(io) {
                     return socket.emit("sceneData", { error: "Player not found." });
                 }
 
-                // RESULT OF MOVE COMMAND
+                // Handle command (move, etc.)
                 const result = await handler(cmd, player, socket);
 
-                // ==================================================
-                // UNIFIED OUTPUT SHAPE (VERY IMPORTANT)
-                // ALWAYS RETURN { x, y, currentLoc }
-                // ==================================================
                 const rx = result.currentLoc?.x ?? result.x;
                 const ry = result.currentLoc?.y ?? result.y;
 
@@ -153,22 +145,38 @@ module.exports = function socketHandler(io) {
                     currentLoc: { x: rx, y: ry }
                 };
 
-                socket.emit("sceneData", normalized);
-
-                // Persist new location
+                // ======================================================
+                // ⭐ ADDED BLOCK — LOAD SCENE CREATURES ON MOVE
+                // ======================================================
                 if (rx !== undefined && ry !== undefined) {
+                    const newScene = await db.collection("scene_data").findOne({ x: rx, y: ry });
+
+                    if (newScene) {
+                        ensureSceneState(newScene._id, newScene);
+                        const newSceneState = getSceneState(newScene._id);
+
+                        normalized.creatures = newSceneState.activeCreatures.filter(c => c.alive);
+                        normalized.entranceDesc = newScene.entranceDesc;
+                        normalized.exits = newScene.exits;
+                        normalized.region = newScene.regionId;
+                        normalized.security = newScene.security ?? 0;
+                        normalized.name = newScene.name;
+                    }
+
+                    // Save new location
                     await db.collection("player_data").updateOne(
                         { _id: player._id },
                         { $set: { "currentLoc.x": rx, "currentLoc.y": ry } }
                     );
                 }
 
+                socket.emit("sceneData", normalized);
+
             } catch (err) {
                 console.error("COMMAND ERROR:", err);
                 socket.emit("sceneData", { error: "Server error processing command." });
             }
         });
-
 
         socket.on("disconnect", () => {
             console.log("❌ Client disconnected:", socket.id);

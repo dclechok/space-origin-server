@@ -1,6 +1,6 @@
 // world/sceneState.js
 
-// Global in-memory world state
+// Global in-memory persistent world state
 const worldState = {
   scenes: {} // sceneId -> sceneState object
 };
@@ -10,13 +10,13 @@ const worldState = {
  * Optionally attach/refresh its config from the DB.
  */
 function ensureSceneState(sceneId, sceneConfig = null) {
-  const key = String(sceneId);   // ← FIX HERE
+  const key = String(sceneId);
 
   if (!worldState.scenes[key]) {
     worldState.scenes[key] = {
       sceneId: key,
       config: sceneConfig || null,
-      activeCreatures: [],
+      activeCreatures: [],       // ← PERSISTENT until server reboot
       playersInScene: new Set(),
       lastActive: Date.now()
     };
@@ -27,7 +27,6 @@ function ensureSceneState(sceneId, sceneConfig = null) {
   return worldState.scenes[key];
 }
 
-
 /**
  * Get an existing sceneState or null
  */
@@ -35,17 +34,11 @@ function getSceneState(sceneId) {
   return worldState.scenes[String(sceneId)] || null;
 }
 
-/**
- * Mark scene as active (called whenever a player interacts with it)
- */
 function markSceneActive(sceneId) {
   const state = ensureSceneState(sceneId);
   state.lastActive = Date.now();
 }
 
-/**
- * Track players entering / leaving scenes (optional but useful)
- */
 function addPlayerToScene(sceneId, playerId) {
   const key = String(sceneId);
   const state = ensureSceneState(key);
@@ -61,30 +54,24 @@ function removePlayerFromScene(sceneId, playerId) {
 }
 
 /**
- * Unload a scene from memory (e.g., no players for a while)
+ * DISABLED — scenes never unload in persistent world modees
  */
 function unloadScene(sceneId) {
-  delete worldState.scenes[sceneId];
+  console.log(`⚠️ unloadScene(${sceneId}) ignored (persistent world mode).`);
 }
 
 /**
- * Return all active scene states as an array
+ * DISABLED — do not remove scenes automatically
  */
+function cleanupInactiveScenes(timeoutMs) {
+  for (const [sceneId] of Object.entries(worldState.scenes)) {
+    // Just log; do nothing
+    // console.log(`Scene ${sceneId} inactive but preserved.`);
+  }
+}
+
 function getActiveScenes() {
   return Object.values(worldState.scenes);
-}
-
-/**
- * Optional cleanup: remove scenes with no players after timeoutMs
- */
-function cleanupInactiveScenes(timeoutMs = 10 * 60 * 1000) {
-  const now = Date.now();
-  for (const [sceneId, state] of Object.entries(worldState.scenes)) {
-    if (state.playersInScene.size === 0 &&
-        now - state.lastActive > timeoutMs) {
-      delete worldState.scenes[sceneId];
-    }
-  }
 }
 
 module.exports = {
