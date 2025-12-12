@@ -1,17 +1,26 @@
-// world/spawner.js
-
 const { getCreatureTemplate } = require("../mobs/creatureRegistry");
 
 let ioRef = null;
 
-// Utility: random float within scene bounds
+// Utility random int
 function randomInt(max) {
   return Math.floor(Math.random() * max);
 }
 
-/**
- * WORLD TICK
- */
+/* ----------------------------------------------------------------------------
+   CLASSIFICATION Y-RANGES (percentage of scene height)
+---------------------------------------------------------------------------- */
+const CLASS_Y_RANGES = {
+  vermin:   [78, 88],
+  humanoid: [75, 85],
+  beast:    [80, 88],
+  flyer:    [62, 70],
+  boss:     [72, 82]
+};
+
+/* ----------------------------------------------------------------------------
+   WORLD TICK
+---------------------------------------------------------------------------- */
 function updateSceneSpawns(sceneState, now = Date.now()) {
   const sceneConfig = sceneState.config;
   if (!sceneConfig || !Array.isArray(sceneConfig.spawners)) return;
@@ -25,10 +34,10 @@ function updateSceneSpawns(sceneState, now = Date.now()) {
   handleRespawns(sceneState, now);
 }
 
-/**
- * Ensure spawner has correct number of creatures
- */
-function ensureSpawnerPopulation(sceneState, spawner, now) {
+/* ----------------------------------------------------------------------------
+   ENSURE POPULATION
+---------------------------------------------------------------------------- */
+function ensureSpawnerPopulation(sceneState, spawner) {
   const { creatureId, maxAlive = 0 } = spawner;
 
   const aliveList = sceneState.activeCreatures.filter(
@@ -38,40 +47,47 @@ function ensureSpawnerPopulation(sceneState, spawner, now) {
   const missing = maxAlive - aliveList.length;
   if (missing <= 0) return;
 
-  console.log(`🐀 Spawner '${spawner.id}' missing ${missing} creatures.`);
-
   for (let i = 0; i < missing; i++) {
-    spawnCreature(sceneState, spawner, now);
+    spawnCreature(sceneState, spawner);
   }
 }
 
-/**
- * Spawn creature WITH SERVER-ASSIGNED RANDOM POSITION + RANDOM FACING
- */
+/* ----------------------------------------------------------------------------
+   SPAWN CREATURE
+---------------------------------------------------------------------------- */
 let instanceCounter = 1;
-function spawnCreature(sceneState, spawner, now) {
-  const template = getCreatureTemplate(spawner.creatureId);
-  if (!template) {
+
+function spawnCreature(sceneState, spawner) {
+  const rawTemplate = getCreatureTemplate(spawner.creatureId);
+  if (!rawTemplate) {
     console.error("❌ Creature template not found:", spawner.creatureId);
     return;
   }
 
-  // Scene dimensions (fallbacks)
+  // clone template so mutations never touch the original
+  const template = { ...rawTemplate };
+
+  // ensure template cannot override facing
+  delete template.facing;
+
   const sceneWidth = sceneState.config?.width ?? 800;
   const sceneHeight = sceneState.config?.height ?? 450;
 
-  // RANDOM POSITION — server authoritative
-  const randomXPos =
-    spawner.spawnX ??
-    randomInt(sceneWidth - 64); // sprite width approx
+  // Determine classification Y-range
+  const range = CLASS_Y_RANGES[template.classification];
 
-  const randomYPos =
-    spawner.spawnY ??
-    randomInt(sceneHeight - 64);
+  function pickY() {
+    if (range) {
+      const [min, max] = range;
+      return Math.floor(((Math.random() * (max - min)) + min) / 100 * sceneHeight);
+    }
+    return randomInt(sceneHeight - 64);
+  }
 
-  // RANDOM FACING (kept for all players)
-  const facing = Math.random() < 0.5 ? 1 : -1;
+  const x = spawner.spawnX !== undefined ? spawner.spawnX : randomInt(sceneWidth - 64);
+  const y = spawner.spawnY !== undefined ? spawner.spawnY : pickY();
 
+  // Build creature instance
   const instance = {
     ...template,
     instanceId: `${template.id}#${instanceCounter++}`,
@@ -79,14 +95,12 @@ function spawnCreature(sceneState, spawner, now) {
     spawnerId: spawner.id,
     alive: true,
     respawnAt: null,
-
-    // SERVER-PROVIDED RANDOM COORDINATES
-    x: randomXPos,
-    y: randomYPos,
-
-    // FACE LEFT (-1) OR RIGHT (1)
-    facing
+    x,
+    y
   };
+
+  // Apply random facing AFTER template spread
+  instance.facing = Math.random() < 0.5 ? 1 : -1;
 
   if (template.stats?.maxHP) {
     instance.currentHP = template.stats.maxHP;
@@ -94,16 +108,9 @@ function spawnCreature(sceneState, spawner, now) {
 
   sceneState.activeCreatures.push(instance);
 
-  console.log(`🧬 Spawned ${instance.instanceId} at (${instance.x}, ${instance.y}) facing ${instance.facing}`);
+  console.log("CREATURE OUTGOING:", instance);
 
-  // → broadcast entrance message
-  if (instance.entranceDesc && ioRef) {
-    for (const pid of sceneState.playersInScene) {
-      ioRef.to(pid).emit("terminal_message", instance.entranceDesc);
-    }
-  }
-
-  // → broadcast spawn event WITH THE NEW POSITION + FACING
+  // Broadcast spawn event
   if (ioRef) {
     for (const pid of sceneState.playersInScene) {
       ioRef.to(pid).emit("creature_spawned", instance);
@@ -113,33 +120,49 @@ function spawnCreature(sceneState, spawner, now) {
   return instance;
 }
 
-/**
- * Death + Respawn
- */
+/* ----------------------------------------------------------------------------
+   DEATH + RESPAWN
+---------------------------------------------------------------------------- */
 function markCreatureDead(creature, spawnerConfig, now = Date.now()) {
   creature.alive = false;
   creature.respawnAt = now + (spawnerConfig.respawnSec || 30) * 1000;
 }
 
 function handleRespawns(sceneState, now) {
+  const sceneWidth = sceneState.config?.width ?? 800;
+  const sceneHeight = sceneState.config?.height ?? 450;
+
   for (const creature of sceneState.activeCreatures) {
     if (!creature.alive || !creature.respawnAt || now < creature.respawnAt) continue;
 
-    // fully respawned
     creature.alive = true;
     creature.respawnAt = null;
 
-    // restore HP
     if (creature.stats?.maxHP) {
       creature.currentHP = creature.stats.maxHP;
     }
 
-    // assign NEW random location and facing
-    creature.x = randomInt(800 - 64); // you can use scene width
-    creature.y = randomInt(450 - 64);
+    const range = CLASS_Y_RANGES[creature.classification];
+
+    function pickX() {
+      return randomInt(sceneWidth - 64);
+    }
+
+    function pickY() {
+      if (range) {
+        const [min, max] = range;
+        return Math.floor(((Math.random() * (max - min)) + min) / 100 * sceneHeight);
+      }
+      return randomInt(sceneHeight - 64);
+    }
+
+    creature.x = pickX();
+    creature.y = pickY();
+
+    // Random facing again
     creature.facing = Math.random() < 0.5 ? 1 : -1;
 
-    console.log(`🔄 Respawned ${creature.instanceId} @ (${creature.x}, ${creature.y})`);
+    console.log("🔄 Respawned:", creature);
 
     if (ioRef) {
       for (const pid of sceneState.playersInScene) {
@@ -149,6 +172,9 @@ function handleRespawns(sceneState, now) {
   }
 }
 
+/* ----------------------------------------------------------------------------
+   INIT
+---------------------------------------------------------------------------- */
 function initSpawner(io) {
   ioRef = io;
   console.log("🔌 Spawner IO initialized.");
