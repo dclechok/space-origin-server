@@ -3,6 +3,7 @@ const commandParser = require("./../commands/commandParser");
 const { ObjectId } = require("mongodb");
 const activePlayers = {};
 const { ensureSceneState, addPlayerToScene, getSceneState } = require("../world/sceneState");
+const { WORLD_SEED } = require("../world/worldSeed");
 
 module.exports = function socketHandler(io) {
 
@@ -10,6 +11,9 @@ module.exports = function socketHandler(io) {
 
     io.on("connection", (socket) => {
         console.log("🔥 Client connected:", socket.id);
+        socket.emit("world:init", {
+            worldSeed: WORLD_SEED,
+        });
 
         socket.on("identify", ({ characterId }) => {
             console.log("👤 identify:", socket.id, "=>", characterId);
