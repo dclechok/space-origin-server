@@ -1,8 +1,9 @@
-// socketHandler.js (OPEN WORLD MMO + GLOBAL CHAT)
+// socketHandler.js (OPEN WORLD MMO + GLOBAL CHAT) — SAFER VERSION
 const { ObjectId } = require("mongodb");
 const { WORLD_SEED } = require("../world/worldSeed");
 
 const activePlayers = {}; // socket.id -> characterId
+const playerMeta = {};    // socket.id -> { characterId, name }
 
 // Authoritative ship state
 // socket.id -> { x, y, vx, vy, angle, lastSeenAt }
@@ -25,24 +26,30 @@ function pushChat(msg) {
   }
 }
 
+// Simple chat rate-limit (per socket)
+const CHAT_MIN_INTERVAL_MS = 800;     // at most ~1.25 msg/sec per socket
+const CHAT_MSG_MAX = 240;
+const CHAT_NAME_MAX = 24;
+const lastChatAt = {}; // socket.id -> timestamp
+
 module.exports = function socketHandler(io) {
   // ======================================================
   // Tunables
   // ======================================================
-  const TICK_HZ = 20;           // physics tick
+  const TICK_HZ = 20; // physics tick
   const DT = 1 / TICK_HZ;
 
-  const SNAPSHOT_HZ = 10;       // network snapshot rate (MMO-ish)
-  const SNAPSHOT_DT = 1 / SNAPSHOT_HZ;
+  const SNAPSHOT_HZ = 10; // network snapshot rate (MMO-ish)
+  // const SNAPSHOT_DT = 1 / SNAPSHOT_HZ; // (not used)
 
   // Movement
-  const TURN_RATE = 7.5;        // rad/sec
-  const THRUST = 180;           // px/sec^2
-  const DRAG = 0.92;            // per-tick damping
-  const MAX_SPEED = 320;        // px/sec cap
+  const TURN_RATE = 7.5; // rad/sec
+  const THRUST = 180;    // px/sec^2
+  const DRAG = 0.92;     // per-tick damping
+  const MAX_SPEED = 320; // px/sec cap
 
   // MMO interest management
-  const VIEW_RADIUS = 2400;     // how far you can "see" other players (world units / px)
+  const VIEW_RADIUS = 2400; // world units / px
   const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
 
   // Drop stale inputs (optional safety)
@@ -61,6 +68,14 @@ module.exports = function socketHandler(io) {
     return wrapAngle(current + d);
   }
 
+  function safeNameFromMeta(socketId) {
+    const n = playerMeta[socketId]?.name;
+    if (!n) return null;
+    const s = String(n).trim();
+    if (!s) return null;
+    return s.slice(0, CHAT_NAME_MAX);
+  }
+
   function buildNearbySnapshot(meId) {
     const me = shipState[meId];
     if (!me) return {};
@@ -72,9 +87,11 @@ module.exports = function socketHandler(io) {
     for (const [id, p] of Object.entries(shipState)) {
       if (!p) continue;
 
+      const name = playerMeta[id]?.name || null;
+
       // Always include yourself
       if (id === meId) {
-        players[id] = { x: p.x, y: p.y, angle: p.angle };
+        players[id] = { x: p.x, y: p.y, angle: p.angle, name };
         continue;
       }
 
@@ -83,7 +100,7 @@ module.exports = function socketHandler(io) {
       const d2 = dx * dx + dy * dy;
 
       if (d2 <= VIEW_RADIUS_SQ) {
-        players[id] = { x: p.x, y: p.y, angle: p.angle };
+        players[id] = { x: p.x, y: p.y, angle: p.angle, name };
       }
     }
 
@@ -103,7 +120,7 @@ module.exports = function socketHandler(io) {
 
       // If input is stale, treat as no thrust (prevents "stuck thrust" on packet loss)
       const thrusting =
-        inp && (now - (inp.lastAt || 0) <= INPUT_STALE_MS) ? !!inp.thrust : false;
+        inp && now - (inp.lastAt || 0) <= INPUT_STALE_MS ? !!inp.thrust : false;
 
       const targetAngle =
         inp && Number.isFinite(inp.targetAngle) ? inp.targetAngle : p.angle;
@@ -140,9 +157,7 @@ module.exports = function socketHandler(io) {
   setInterval(() => {
     const now = Date.now();
 
-    // Send each client only what they should see
-    for (const [socketId, characterId] of Object.entries(activePlayers)) {
-      // Only send to connected sockets that still have state
+    for (const [socketId] of Object.entries(activePlayers)) {
       const sock = io.sockets.sockets.get(socketId);
       if (!sock) continue;
       if (!shipState[socketId]) continue;
@@ -166,16 +181,27 @@ module.exports = function socketHandler(io) {
     // Initialize input record (safe defaults)
     shipInput[socket.id] = { thrust: false, targetAngle: 0, lastAt: Date.now() };
 
-    // ---- GLOBAL CHAT ----
-    socket.on("sendMessage", ({ user, message } = {}) => {
-      const cleanUser = String(user ?? "").trim().slice(0, 24);
-      const cleanMsg = String(message ?? "").trim().slice(0, 240);
+    // ---- GLOBAL CHAT (safer) ----
+    // - ignores client-provided "user"
+    // - rate-limits per socket
+    // - uses server-known charName (playerMeta)
+    socket.on("sendMessage", ({ message } = {}) => {
+      const now = Date.now();
+
+      // basic per-socket rate limit
+      const prev = lastChatAt[socket.id] || 0;
+      if (now - prev < CHAT_MIN_INTERVAL_MS) return;
+      lastChatAt[socket.id] = now;
+
+      const cleanMsg = String(message ?? "").trim().slice(0, CHAT_MSG_MAX);
       if (!cleanMsg) return;
 
+      const serverName = safeNameFromMeta(socket.id) || "Unknown";
+
       const payload = {
-        user: cleanUser || "Unknown",
+        user: serverName,
         message: cleanMsg,
-        at: Date.now(),
+        at: now,
       };
 
       pushChat(payload);
@@ -193,16 +219,38 @@ module.exports = function socketHandler(io) {
         return;
       }
 
+      // Validate ObjectId early
+      let oid;
+      try {
+        oid = new ObjectId(String(characterId));
+      } catch {
+        socket.emit("sceneError", { error: "Invalid characterId." });
+        return;
+      }
+
       activePlayers[socket.id] = String(characterId);
 
       try {
         const db = require("../config/db").getDB();
-        const player = await db.collection("player_data").findOne({
-          _id: new ObjectId(characterId),
-        });
+        const player = await db.collection("player_data").findOne(
+          { _id: oid },
+          { projection: { currentLoc: 1, charName: 1 } }
+        );
+
+        if (!player) {
+          socket.emit("sceneError", { error: "Character not found." });
+          return;
+        }
 
         const x = Number(player?.currentLoc?.x ?? 0);
         const y = Number(player?.currentLoc?.y ?? 0);
+
+        // ✅ Name from DB (charName) + normalize/limit
+        const nameRaw = String(player?.charName ?? "").trim();
+        const name = nameRaw ? nameRaw.slice(0, CHAT_NAME_MAX) : null;
+
+        // ✅ store meta for snapshots + chat
+        playerMeta[socket.id] = { characterId: String(characterId), name };
 
         shipState[socket.id] = {
           x,
@@ -213,9 +261,12 @@ module.exports = function socketHandler(io) {
           lastSeenAt: Date.now(),
         };
 
-        socket.emit("player:self", { id: socket.id, ship: shipState[socket.id] });
+        // ✅ include name so client can show it immediately if desired
+        socket.emit("player:self", {
+          id: socket.id,
+          ship: { ...shipState[socket.id], name },
+        });
 
-        // Optional: immediate snapshot so they see others instantly
         socket.emit("world:snapshot", {
           players: buildNearbySnapshot(socket.id),
           t: Date.now(),
@@ -230,17 +281,17 @@ module.exports = function socketHandler(io) {
     // player:input: intent only (server sim applies)
     // ------------------------------------------------------
     socket.on("player:input", ({ thrust, targetAngle } = {}) => {
-      // Must be identified and spawned
       if (!activePlayers[socket.id]) return;
       if (!shipState[socket.id]) return;
 
+      // sanitize targetAngle
+      const ta = Number(targetAngle);
       shipInput[socket.id] = {
         thrust: !!thrust,
-        targetAngle: Number.isFinite(targetAngle) ? targetAngle : 0,
+        targetAngle: Number.isFinite(ta) ? ta : shipState[socket.id].angle,
         lastAt: Date.now(),
       };
 
-      // Mark alive (if you ever want timeout kick/cleanup)
       shipState[socket.id].lastSeenAt = Date.now();
     });
 
@@ -252,6 +303,8 @@ module.exports = function socketHandler(io) {
       delete activePlayers[socket.id];
       delete shipState[socket.id];
       delete shipInput[socket.id];
+      delete playerMeta[socket.id];
+      delete lastChatAt[socket.id];
     });
   });
 };
