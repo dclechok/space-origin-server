@@ -1,4 +1,4 @@
-// socketHandler.js (SPACE / REALTIME VERSION) — CLEAN
+// socketHandler.js (SPACE / REALTIME VERSION) — CLEAN + GLOBAL CHAT
 const { ObjectId } = require("mongodb");
 const { WORLD_SEED } = require("../world/worldSeed");
 
@@ -11,6 +11,19 @@ const shipState = {};
 // Last input per player
 // socket.id -> { thrust, targetAngle, lastAt }
 const shipInput = {};
+
+// ------------------------------
+// GLOBAL CHAT (server-wide)
+// ------------------------------
+const CHAT_MAX = 100;
+const chatHistory = []; // [{ user, message, at }]
+
+function pushChat(msg) {
+  chatHistory.push(msg);
+  if (chatHistory.length > CHAT_MAX) {
+    chatHistory.splice(0, chatHistory.length - CHAT_MAX);
+  }
+}
 
 module.exports = function socketHandler(io) {
   // ======================================================
@@ -105,6 +118,25 @@ module.exports = function socketHandler(io) {
 
     // Initialize input record immediately (prevents undefined edge cases)
     shipInput[socket.id] = { thrust: false, targetAngle: 0, lastAt: Date.now() };
+
+    // ---- GLOBAL CHAT: send history immediately on connect ----
+    socket.emit("chatHistory", chatHistory);
+
+    // ---- GLOBAL CHAT: receive + broadcast ----
+    socket.on("sendMessage", ({ user, message } = {}) => {
+      const cleanUser = String(user ?? "").trim().slice(0, 24);
+      const cleanMsg = String(message ?? "").trim().slice(0, 240);
+      if (!cleanMsg) return;
+
+      const payload = {
+        user: cleanUser || "Unknown",
+        message: cleanMsg,
+        at: Date.now(),
+      };
+
+      pushChat(payload);
+      io.emit("newMessage", payload); // server-wide
+    });
 
     // ------------------------------------------------------
     // identify: bind characterId + spawn ship from DB
@@ -222,11 +254,7 @@ module.exports = function socketHandler(io) {
       const hasActive = !!activePlayers[socket.id];
       const hasShip = !!shipState[socket.id];
 
-      if (!hasActive || !hasShip) {
-        // keep this quiet once things are stable; comment out if noisy
-        // console.log("❌ INPUT IGNORED", socket.id, { hasActive, hasShip });
-        return;
-      }
+      if (!hasActive || !hasShip) return;
 
       shipInput[socket.id] = {
         thrust: !!thrust,
@@ -243,6 +271,7 @@ module.exports = function socketHandler(io) {
       delete activePlayers[socket.id];
       delete shipState[socket.id];
       delete shipInput[socket.id];
+      // (chatHistory is global; keep it)
     });
   });
 };
