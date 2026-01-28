@@ -7,8 +7,6 @@ const { connectDB } = require("./config/db");
 const routes = require("./routes");
 const socketHandler = require("./sockets/socket");
 
-const { initSpawner } = require("./world/spawner");
-
 const { startWorldTick } = require("./world/worldTick");
 
 const app = express();
@@ -35,8 +33,6 @@ async function startServer() {
 
   // SOCKET.IO HANDLER
   socketHandler(io);
-
-  initSpawner(io);
 
   startWorldTick();
 
