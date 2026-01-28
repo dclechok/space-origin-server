@@ -1,29 +1,29 @@
-// socketHandler.js (SPACE / REALTIME VERSION)
+// socketHandler.js (SPACE / REALTIME VERSION) — CLEAN
 const { ObjectId } = require("mongodb");
 const { WORLD_SEED } = require("../world/worldSeed");
 
 const activePlayers = {}; // socket.id -> characterId
 
-// realtime ship state (authoritative)
+// Authoritative ship state
 // socket.id -> { x, y, vx, vy, angle, sceneId }
 const shipState = {};
 
-// last input per player
+// Last input per player
 // socket.id -> { thrust, targetAngle, lastAt }
 const shipInput = {};
 
 module.exports = function socketHandler(io) {
-  // -----------------------------
+  // ======================================================
   // Authoritative tick loop
-  // -----------------------------
+  // ======================================================
   const TICK_HZ = 20;
   const DT = 1 / TICK_HZ;
 
   // Tunables (tweak freely)
-  const TURN_RATE = 7.5;  // rad/sec
-  const THRUST = 180;     // accel
-  const DRAG = 0.92;      // velocity damping per tick
-  const MAX_SPEED = 320;  // cap
+  const TURN_RATE = 7.5; // rad/sec
+  const THRUST = 180; // px/sec^2
+  const DRAG = 0.92; // per-tick damping
+  const MAX_SPEED = 320; // px/sec cap
 
   function wrapAngle(a) {
     while (a <= -Math.PI) a += Math.PI * 2;
@@ -38,10 +38,20 @@ module.exports = function socketHandler(io) {
     return wrapAngle(current + d);
   }
 
+  function buildSnapshotForScene(sceneId) {
+    const players = {};
+    for (const [id, p] of Object.entries(shipState)) {
+      if (!p || p.sceneId !== sceneId) continue;
+      players[id] = { x: p.x, y: p.y, angle: p.angle };
+    }
+    return players;
+  }
+
   setInterval(() => {
-    // update physics
-    for (const id of Object.keys(shipState)) {
-      const p = shipState[id];
+    // 1) Simulate movement
+    for (const [id, p] of Object.entries(shipState)) {
+      if (!p) continue;
+
       const inp = shipInput[id];
 
       if (inp) {
@@ -69,35 +79,44 @@ module.exports = function socketHandler(io) {
       p.y += p.vy * DT;
     }
 
-    // broadcast snapshots PER SCENE ROOM
-    const byScene = new Map(); // sceneId -> players map
-
-    for (const [id, p] of Object.entries(shipState)) {
-      if (!p.sceneId) continue;
-      if (!byScene.has(p.sceneId)) byScene.set(p.sceneId, {});
-      byScene.get(p.sceneId)[id] = { x: p.x, y: p.y, angle: p.angle };
+    // 2) Broadcast per-scene snapshots
+    const scenes = new Set();
+    for (const p of Object.values(shipState)) {
+      if (p?.sceneId) scenes.add(p.sceneId);
     }
 
-    for (const [sceneId, players] of byScene.entries()) {
+    const now = Date.now();
+    for (const sceneId of scenes) {
       io.to(sceneId).emit("world:snapshot", {
-        players,
-        t: Date.now(),
+        players: buildSnapshotForScene(sceneId),
+        t: now,
       });
     }
   }, 1000 / TICK_HZ);
 
-  // -----------------------------
+  // ======================================================
   // Socket connections
-  // -----------------------------
+  // ======================================================
   io.on("connection", (socket) => {
     console.log("🔥 Client connected:", socket.id);
 
-    // World seed (shared background determinism)
+    // Seed (for deterministic background)
     socket.emit("world:init", { worldSeed: WORLD_SEED });
 
-    // Identify player (attach characterId + init ship state from DB)
+    // Initialize input record immediately (prevents undefined edge cases)
+    shipInput[socket.id] = { thrust: false, targetAngle: 0, lastAt: Date.now() };
+
+    // ------------------------------------------------------
+    // identify: bind characterId + spawn ship from DB
+    // ------------------------------------------------------
     socket.on("identify", async ({ characterId }) => {
       console.log("👤 identify:", socket.id, "=>", characterId);
+
+      if (!characterId) {
+        socket.emit("sceneError", { error: "Missing characterId." });
+        return;
+      }
+
       activePlayers[socket.id] = characterId;
 
       try {
@@ -118,7 +137,7 @@ module.exports = function socketHandler(io) {
           sceneId: null,
         };
 
-        // tell the client its authoritative id + initial state
+        // tell the client its authoritative socket id + initial ship state
         socket.emit("player:self", { id: socket.id, ship: shipState[socket.id] });
       } catch (err) {
         console.error("❌ identify error:", err);
@@ -126,8 +145,10 @@ module.exports = function socketHandler(io) {
       }
     });
 
-    // Load scene (joins scene room so you only see local players)
-    socket.on("loadScene", async ({ x, y } = {}) => {
+    // ------------------------------------------------------
+    // loadScene: join scene room (so snapshots are local)
+    // ------------------------------------------------------
+    socket.on("loadScene", async (_payload = {}) => {
       try {
         const db = require("../config/db").getDB();
 
@@ -149,30 +170,31 @@ module.exports = function socketHandler(io) {
 
         const scene = await db.collection("scene_data").findOne({ x: px, y: py });
         if (!scene) {
-          return socket.emit("sceneError", { error: `Scene [${px}, ${py}] not found` });
+          return socket.emit("sceneError", {
+            error: `Scene [${px}, ${py}] not found`,
+          });
         }
 
         const sceneId = String(scene._id);
 
-        // leave any previous scene rooms (optional safety)
-        // note: socket.rooms includes socket.id by default; leave only actual rooms
+        // Leave any previous non-default rooms
         for (const room of socket.rooms) {
           if (room !== socket.id) socket.leave(room);
         }
 
         socket.join(sceneId);
 
-        // make sure ship state exists
+        // Ensure ship state exists
         if (!shipState[socket.id]) {
           shipState[socket.id] = { x: px, y: py, vx: 0, vy: 0, angle: 0, sceneId };
         } else {
           shipState[socket.id].sceneId = sceneId;
-          // (optional) snap to DB position when loading
+          // snap to DB position on load
           shipState[socket.id].x = px;
           shipState[socket.id].y = py;
         }
 
-        // minimal scene data for your UI (keep or expand later)
+        // Minimal scene data (keep for UI)
         socket.emit("sceneData", {
           currentLoc: { x: px, y: py },
           name: scene.name,
@@ -182,13 +204,9 @@ module.exports = function socketHandler(io) {
           security: scene.security ?? 0,
         });
 
-        // push an immediate snapshot so the client renders instantly
+        // Immediate snapshot so they render instantly
         io.to(sceneId).emit("world:snapshot", {
-          players: Object.fromEntries(
-            Object.entries(shipState)
-              .filter(([, p]) => p.sceneId === sceneId)
-              .map(([id, p]) => [id, { x: p.x, y: p.y, angle: p.angle }])
-          ),
+          players: buildSnapshotForScene(sceneId),
           t: Date.now(),
         });
       } catch (err) {
@@ -197,10 +215,18 @@ module.exports = function socketHandler(io) {
       }
     });
 
-    // Receive input intent (authoritative server sim)
-    socket.on("player:input", ({ thrust, targetAngle }) => {
-      if (!activePlayers[socket.id]) return; // must identify first
-      if (!shipState[socket.id]) return;      // must have ship state
+    // ------------------------------------------------------
+    // player:input: intent only (server sim applies)
+    // ------------------------------------------------------
+    socket.on("player:input", ({ thrust, targetAngle } = {}) => {
+      const hasActive = !!activePlayers[socket.id];
+      const hasShip = !!shipState[socket.id];
+
+      if (!hasActive || !hasShip) {
+        // keep this quiet once things are stable; comment out if noisy
+        // console.log("❌ INPUT IGNORED", socket.id, { hasActive, hasShip });
+        return;
+      }
 
       shipInput[socket.id] = {
         thrust: !!thrust,
@@ -209,6 +235,9 @@ module.exports = function socketHandler(io) {
       };
     });
 
+    // ------------------------------------------------------
+    // disconnect: cleanup
+    // ------------------------------------------------------
     socket.on("disconnect", () => {
       console.log("❌ Client disconnected:", socket.id);
       delete activePlayers[socket.id];
