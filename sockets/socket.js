@@ -250,37 +250,6 @@ module.exports = function socketHandler(io) {
         p.vy *= k;
       }
 
-      // --------------------------------------------------
-      // ✅ DEBUG: actual simulated speed (direction-agnostic)
-      // Place: after drag + clamp, before integrate.
-      // --------------------------------------------------
-      p._spdLogAt = p._spdLogAt || 0;
-      if (now - p._spdLogAt > 250) {
-        p._spdLogAt = now;
-
-        const spd = Math.hypot(p.vx, p.vy);
-
-        let toward = null;
-        if (p.moveTarget) {
-          const tdx = p.moveTarget.x - p.x;
-          const tdy = p.moveTarget.y - p.y;
-          const tdist = Math.hypot(tdx, tdy);
-          if (tdist > 0.0001) {
-            const dirx = tdx / tdist;
-            const diry = tdy / tdist;
-            toward = p.vx * dirx + p.vy * diry;
-          }
-        }
-
-        console.log(
-          `[SERVER PHYS] id=${id.slice(0, 4)} vx=${p.vx.toFixed(
-            1
-          )} vy=${p.vy.toFixed(1)} sp=${spd.toFixed(1)} toward=${
-            toward === null ? "n/a" : toward.toFixed(1)
-          }`
-        );
-      }
-
       // integrate
       p.x += p.vx * DT;
       p.y += p.vy * DT;
