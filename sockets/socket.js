@@ -1,16 +1,16 @@
-// socketHandler.js (OPEN WORLD MMO + GLOBAL CHAT) — CLICK/DRAG-TO-MOVE (NO OVERSHOOT / NO SPIN / NO FLOP)
+// sockets/socket.js (OPEN WORLD MMO + GLOBAL CHAT) — CLICK/DRAG-TO-MOVE (NO OVERSHOOT / NO SPIN / NO FLOP)
+//
 // Key fixes vs your version:
 // 1) Arrival is DISTANCE-ONLY: when within ARRIVE_RADIUS, we SNAP to target, ZERO velocity, CLEAR moveTarget.
-//    (This prevents the oscillation loop caused by requiring speed <= STOP_EPS.)
-// 2) No "minimum arrive speed" creep. MIN_ARRIVE_SPEED removed -> it won’t keep forcing motion past the point.
-// 3) While approaching, we compare speed ALONG the target direction (speedToward) so sideways drift doesn’t
-//    trigger weird thrust/brake behavior.
-// 4) Near the destination we stop re-aiming at the target (FACE_LOCK_RADIUS) to prevent atan2 flipping.
+// 2) No "minimum arrive speed" creep.
+// 3) Slow zone compares speed ALONG the target direction (speedToward).
+// 4) FACE_LOCK_RADIUS prevents last-moment atan2 flips.
 //
-// ✅ DEBUG ADDED (no behavior changes):
-// - Logs what moveTo deltas the server RECEIVES (dx/dy/dist) at most 5x/sec per socket.
-// - Logs server physics speed (vx/vy/sp and toward-target speed) ~4x/sec per ship.
-//   This will prove whether the slowdown is in physics or in client/render mapping.
+// ✅ UPDATE INCLUDED:
+// - world:snapshot now includes vx/vy per player (for buttery client prediction).
+// - Snapshot still includes server timestamp `t`.
+//
+// NOTE: This file assumes your existing imports/paths are correct.
 
 const { ObjectId } = require("mongodb");
 const { WORLD_SEED } = require("../world/worldSeed");
@@ -39,8 +39,7 @@ function pushChat(msg) {
   }
 }
 
-// Simple chat rate-limit (per socket)
-const CHAT_MIN_INTERVAL_MS = 800; // at most ~1.25 msg/sec per socket
+const CHAT_MIN_INTERVAL_MS = 800;
 const CHAT_MSG_MAX = 240;
 const CHAT_NAME_MAX = 24;
 const lastChatAt = {}; // socket.id -> timestamp
@@ -52,7 +51,7 @@ module.exports = function socketHandler(io) {
   const TICK_HZ = 20; // physics tick
   const DT = 1 / TICK_HZ;
 
-  const SNAPSHOT_HZ = 10; // network snapshot rate
+  const SNAPSHOT_HZ = 20; // network snapshot rate (20Hz feels way better)
 
   // Movement
   const TURN_RATE = 4.5; // rad/sec
@@ -61,24 +60,19 @@ module.exports = function socketHandler(io) {
   const MAX_SPEED = 320; // px/sec cap
 
   // Click-to-move autopilot
-  const SLOW_RADIUS = 120; // px: start easing in (a bit larger helps smooth stops)
-  const ARRIVE_RADIUS = 14; // px: snap + stop inside this radius
+  const SLOW_RADIUS = 120;
+  const ARRIVE_RADIUS = 14;
 
-  // Prevent last-moment “atan2 flips” near target
-  const FACE_LOCK_RADIUS = 28; // px (18–40)
+  const FACE_LOCK_RADIUS = 28;
 
-  // In the slow zone desiredSpeed scales with distance (no forced minimum)
-  const ARRIVE_K = 2.2; // higher = more aggressive approach; lower = gentler
-  const MAX_ARRIVE_SPEED = 170; // caps approach speed within slow zone
+  const ARRIVE_K = 2.2;
+  const MAX_ARRIVE_SPEED = 170;
+  const ARRIVE_DRAG = 0.84;
 
-  // Braking strength when too fast in slow zone
-  const ARRIVE_DRAG = 0.84; // lower = stronger braking
-
-  // MMO interest management
+  // Interest management
   const VIEW_RADIUS = 2400;
   const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
 
-  // Drop stale inputs (optional safety)
   const INPUT_STALE_MS = 2000;
 
   function clamp(x, a, b) {
@@ -106,6 +100,7 @@ module.exports = function socketHandler(io) {
     return s.slice(0, CHAT_NAME_MAX);
   }
 
+  // ✅ Snapshot builder now includes vx/vy for remote prediction
   function buildNearbySnapshot(meId) {
     const me = shipState[meId];
     if (!me) return {};
@@ -120,7 +115,14 @@ module.exports = function socketHandler(io) {
       const name = playerMeta[id]?.name || null;
 
       if (id === meId) {
-        players[id] = { x: p.x, y: p.y, angle: p.angle, name };
+        players[id] = {
+          x: p.x,
+          y: p.y,
+          vx: p.vx,
+          vy: p.vy,
+          angle: p.angle,
+          name,
+        };
         continue;
       }
 
@@ -129,7 +131,14 @@ module.exports = function socketHandler(io) {
       const d2 = dx * dx + dy * dy;
 
       if (d2 <= VIEW_RADIUS_SQ) {
-        players[id] = { x: p.x, y: p.y, angle: p.angle, name };
+        players[id] = {
+          x: p.x,
+          y: p.y,
+          vx: p.vx,
+          vy: p.vy,
+          angle: p.angle,
+          name,
+        };
       }
     }
 
@@ -147,18 +156,12 @@ module.exports = function socketHandler(io) {
 
       const inp = shipInput[id];
 
-      // Manual thrust (stale-protected)
       const manualThrust =
         inp && now - (inp.lastAt || 0) <= INPUT_STALE_MS ? !!inp.thrust : false;
 
       let desiredAngle = p.angle;
       let thrusting = manualThrust;
 
-      // --------------------------------------------------
-      // CLICK/DRAG-TO-MOVE AUTOPILOT (persistent destination)
-      // - NO overshoot loop: snap+stop when close enough (distance-only)
-      // - NO end spin: lock facing near destination
-      // --------------------------------------------------
       if (
         p.moveTarget &&
         Number.isFinite(p.moveTarget.x) &&
@@ -171,57 +174,40 @@ module.exports = function socketHandler(io) {
         const dy = ty - p.y;
         const dist = Math.hypot(dx, dy);
 
-        // ARRIVE: snap, stop, clear. (This ends ALL oscillation.)
         if (dist <= ARRIVE_RADIUS) {
+          // snap+stop
           p.x = tx;
           p.y = ty;
           p.vx = 0;
           p.vy = 0;
-
           p.moveTarget = null;
           thrusting = false;
-          desiredAngle = p.angle; // keep current facing
+          desiredAngle = p.angle;
         } else {
-          // Face toward target while traveling, but don't chase direction when close
-          if (dist > FACE_LOCK_RADIUS) {
-            desiredAngle = Math.atan2(dy, dx);
-          } else {
-            desiredAngle = p.angle;
-          }
+          if (dist > FACE_LOCK_RADIUS) desiredAngle = Math.atan2(dy, dx);
 
           if (dist > SLOW_RADIUS) {
-            // Far: go full
             thrusting = true;
           } else {
-            // Near: ease in using speed toward target (not total speed)
             const inv = 1 / dist;
             const dirx = dx * inv;
             const diry = dy * inv;
 
-            // How fast we are moving toward the target (can be negative)
             const speedToward = p.vx * dirx + p.vy * diry;
-
-            // Desired approach speed scales down with distance (no minimum creep)
             const desiredSpeed = clamp(dist * ARRIVE_K, 0, MAX_ARRIVE_SPEED);
 
-            // Thrust only if we're not moving toward fast enough
             thrusting = speedToward < desiredSpeed;
 
-            // If we're coming in too hot, apply extra braking drag
             if (speedToward > desiredSpeed) {
               p.vx *= ARRIVE_DRAG;
               p.vy *= ARRIVE_DRAG;
             } else {
-              // mild damping to smooth out small sideways drift
               p.vx *= 0.985;
               p.vy *= 0.985;
             }
           }
         }
       } else {
-        // --------------------------------------------------
-        // BACKWARDS COMPAT (only if you still send targetAngle)
-        // --------------------------------------------------
         const hasFreshAngle =
           inp &&
           now - (inp.lastAt || 0) <= INPUT_STALE_MS &&
@@ -230,16 +216,13 @@ module.exports = function socketHandler(io) {
         if (hasFreshAngle) desiredAngle = inp.targetAngle;
       }
 
-      // rotate smoothly (no snap)
       p.angle = turnToward(p.angle, desiredAngle, TURN_RATE * DT);
 
-      // thrust
       if (thrusting) {
         p.vx += Math.cos(p.angle) * THRUST * DT;
         p.vy += Math.sin(p.angle) * THRUST * DT;
       }
 
-      // base drag + clamp
       p.vx *= DRAG;
       p.vy *= DRAG;
 
@@ -250,7 +233,6 @@ module.exports = function socketHandler(io) {
         p.vy *= k;
       }
 
-      // integrate
       p.x += p.vx * DT;
       p.y += p.vy * DT;
     }
@@ -283,10 +265,8 @@ module.exports = function socketHandler(io) {
     socket.emit("world:init", { worldSeed: WORLD_SEED });
     socket.emit("chatHistory", chatHistory);
 
-    // Initialize input record (safe defaults)
     shipInput[socket.id] = { thrust: false, targetAngle: 0, lastAt: Date.now() };
 
-    // ---- GLOBAL CHAT (safer) ----
     socket.on("sendMessage", ({ message } = {}) => {
       const now = Date.now();
 
@@ -298,16 +278,13 @@ module.exports = function socketHandler(io) {
       if (!cleanMsg) return;
 
       const serverName = safeNameFromMeta(socket.id) || "Unknown";
-
       const payload = { user: serverName, message: cleanMsg, at: now };
 
       pushChat(payload);
       io.emit("newMessage", payload);
     });
 
-    // ------------------------------------------------------
     // identify: bind characterId + spawn ship from DB
-    // ------------------------------------------------------
     socket.on("identify", async ({ characterId } = {}) => {
       console.log("identify:", socket.id, "=>", characterId);
 
@@ -371,9 +348,7 @@ module.exports = function socketHandler(io) {
       }
     });
 
-    // ------------------------------------------------------
-    // player:moveTo: set/update a persistent destination
-    // ------------------------------------------------------
+    // player:moveTo
     socket.on("player:moveTo", ({ x, y } = {}) => {
       if (!activePlayers[socket.id]) return;
       const p = shipState[socket.id];
@@ -385,28 +360,8 @@ module.exports = function socketHandler(io) {
 
       p.moveTarget = { x: tx, y: ty };
       p.lastSeenAt = Date.now();
-
-      // --------------------------------------------------
-      // ✅ DEBUG: what the server receives for targets
-      // --------------------------------------------------
-      const dx = tx - p.x;
-      const dy = ty - p.y;
-      const dist = Math.hypot(dx, dy);
-
-      p._lastMoveLogAt = p._lastMoveLogAt || 0;
-      const now = Date.now();
-      if (now - p._lastMoveLogAt > 200) {
-        p._lastMoveLogAt = now;
-        console.log(
-          `[SERVER moveTo RECV] id=${socket.id.slice(
-            0,
-            4
-          )} dx=${dx.toFixed(1)} dy=${dy.toFixed(1)} dist=${dist.toFixed(1)}`
-        );
-      }
     });
 
-    // Optional: cancel autopilot
     socket.on("player:moveCancel", () => {
       if (!activePlayers[socket.id]) return;
       const p = shipState[socket.id];
@@ -416,9 +371,7 @@ module.exports = function socketHandler(io) {
       p.lastSeenAt = Date.now();
     });
 
-    // ------------------------------------------------------
-    // player:input: intent only (server sim applies)
-    // ------------------------------------------------------
+    // player:input
     socket.on("player:input", ({ thrust, targetAngle } = {}) => {
       if (!activePlayers[socket.id]) return;
       if (!shipState[socket.id]) return;
@@ -436,9 +389,6 @@ module.exports = function socketHandler(io) {
       shipState[socket.id].lastSeenAt = Date.now();
     });
 
-    // ------------------------------------------------------
-    // disconnect: cleanup
-    // ------------------------------------------------------
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
       delete activePlayers[socket.id];
